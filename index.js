@@ -170,7 +170,32 @@ async function run() {
       }
     });
 
+    // Upcoming Meals: Like once per user
+    app.patch('/upcoming-meals/like/:id', async (req, res) => {
+      const mealId = req.params.id;
+      const { email } = req.body;
+      try {
+        const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(mealId) });
+        if (!meal) return res.status(404).send({ message: 'Meal not found' });
 
+        if (meal.likedBy?.includes(email)) {
+          return res.send({ success: false, message: 'Already liked this meal.' });
+        }
+
+        const result = await upcomingMealsCollection.updateOne(
+          { _id: new ObjectId(mealId) },
+          {
+            $inc: { likes: 1 },
+            $addToSet: { likedBy: email },
+          }
+        );
+
+        res.send({ success: result.modifiedCount > 0 });
+      } catch (err) {
+        console.error('Error updating like:', err);
+        res.status(500).send({ success: false, message: 'Internal Server Error' });
+      }
+    });
 
     // Health check
     app.get('/', (req, res) => {
