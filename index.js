@@ -28,6 +28,26 @@ async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+   const db = client.db("hostelDB");
+
+const usersCollection = db.collection("users");
+const mealsCollection = db.collection("meals");
+const reviewsCollection = db.collection("reviews");
+const mealRequestsCollection = db.collection("mealRequests");
+const paymentsCollection = db.collection("payments");
+const upcomingMealsCollection = db.collection("upcomingMeals");
+
+// ✅ Meals endpoint
+    app.get('/meals', async (req, res) => {
+      try {
+        const meals = await mealsCollection.find().toArray();
+        res.send(meals);
+      } catch (error) {
+        console.error("Failed to fetch meals:", error);
+        res.status(500).send({ message: "Internal Server Error" });
+      }
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
