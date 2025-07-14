@@ -1,10 +1,12 @@
 const express = require('express');
 const cors = require('cors');
-const app = express();
 require('dotenv').config();
-const PORT = process.env.PORT || 5000;
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
 app.use(cors());
 app.use(express.json());
 
@@ -26,10 +28,11 @@ async function run() {
 
     const db = client.db('hostelDB');
     const mealsCollection = db.collection('meals');
+    const upcomingMealsCollection = db.collection('upcomingMeals');
     const mealRequestsCollection = db.collection('mealRequests');
     const reviewsCollection = db.collection('reviews');
 
-    // 🔹 Get meals with filters & pagination
+    // Get meals with filters & pagination
     app.get('/meals', async (req, res) => {
       try {
         const {
@@ -63,24 +66,16 @@ async function run() {
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const total = await mealsCollection.countDocuments(query);
-        const meals = await mealsCollection
-          .find(query)
-          .skip(skip)
-          .limit(parseInt(limit))
-          .toArray();
+        const meals = await mealsCollection.find(query).skip(skip).limit(parseInt(limit)).toArray();
 
-        res.send({
-          total,
-          page: parseInt(page),
-          meals,
-        });
+        res.send({ total, page: parseInt(page), meals });
       } catch (error) {
         console.error('Failed to fetch meals:', error);
         res.status(500).send({ message: 'Internal Server Error' });
       }
     });
 
-    // 🔹 Get meal by ID
+    // Get single meal by ID
     app.get('/meals/:id', async (req, res) => {
       try {
         const id = req.params.id;
@@ -93,7 +88,7 @@ async function run() {
       }
     });
 
-    // 🔹 Like a meal
+    // Like a meal
     app.patch('/meals/:id/like', async (req, res) => {
       try {
         const id = req.params.id;
@@ -108,15 +103,13 @@ async function run() {
       }
     });
 
-    // 🔹 Request a meal
+    // Meal request
     app.post('/meal-requests', async (req, res) => {
       try {
         const { mealId, userEmail, userName } = req.body;
-
         if (!mealId || !userEmail || !userName) {
           return res.status(400).send({ message: 'Missing required fields' });
         }
-
         const doc = {
           mealId: new ObjectId(mealId),
           userEmail,
@@ -124,7 +117,6 @@ async function run() {
           status: 'pending',
           requestedAt: new Date(),
         };
-
         const result = await mealRequestsCollection.insertOne(doc);
         res.send(result);
       } catch (error) {
@@ -133,15 +125,13 @@ async function run() {
       }
     });
 
-    // 🔹 Post a review
+    // Post review
     app.post('/reviews', async (req, res) => {
       try {
         const { mealId, userEmail, userName, comment } = req.body;
-
         if (!mealId || !userEmail || !userName || !comment) {
           return res.status(400).send({ message: 'Missing required fields' });
         }
-
         const doc = {
           mealId: new ObjectId(mealId),
           userEmail,
@@ -149,7 +139,6 @@ async function run() {
           comment,
           createdAt: new Date(),
         };
-
         const result = await reviewsCollection.insertOne(doc);
         res.send(result);
       } catch (error) {
@@ -158,14 +147,11 @@ async function run() {
       }
     });
 
-    // 🔹 Get all reviews for a meal
+    // Get reviews for a meal
     app.get('/reviews/:mealId', async (req, res) => {
       try {
         const mealId = req.params.mealId;
-        const reviews = await reviewsCollection
-          .find({ mealId: new ObjectId(mealId) })
-          .sort({ createdAt: -1 })
-          .toArray();
+        const reviews = await reviewsCollection.find({ mealId: new ObjectId(mealId) }).sort({ createdAt: -1 }).toArray();
         res.send(reviews);
       } catch (error) {
         console.error('Failed to get reviews:', error);
@@ -173,21 +159,33 @@ async function run() {
       }
     });
 
-    // Root route
+    // Upcoming Meals: Get All
+    app.get('/upcoming-meals', async (req, res) => {
+      try {
+        const meals = await upcomingMealsCollection.find().toArray();
+        res.send(meals);
+      } catch (error) {
+        console.error('Error fetching upcoming meals:', error);
+        res.status(500).send({ message: 'Failed to fetch upcoming meals' });
+      }
+    });
+
+
+
+    // Health check
     app.get('/', (req, res) => {
       res.send('✅ Server is running.');
     });
 
-    // Confirm DB connection
     await client.db('admin').command({ ping: 1 });
     console.log('✅ MongoDB connected successfully!');
   } finally {
-    // Keeping MongoDB connection open
+    // Keeping the connection alive
   }
 }
+
 run().catch(console.dir);
 
-// Start server
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
