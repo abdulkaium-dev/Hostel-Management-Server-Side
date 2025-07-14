@@ -1,10 +1,9 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 const app = express();
 require('dotenv').config();
 const PORT = process.env.PORT || 5000;
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 app.use(cors());
 app.use(express.json());
@@ -25,6 +24,7 @@ async function run() {
     const db = client.db('hostelDB');
     const mealsCollection = db.collection('meals');
 
+    // Get meals with filters & pagination
     app.get('/meals', async (req, res) => {
       try {
         const {
@@ -75,6 +75,19 @@ async function run() {
       }
     });
 
+    // Get meal by id
+    app.get('/meals/:id', async (req, res) => {
+      try {
+        const id = req.params.id;
+        const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+        if (!meal) return res.status(404).send({ message: 'Meal not found' });
+        res.send(meal);
+      } catch (error) {
+        console.error('Failed to fetch meal:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
     app.get('/', (req, res) => {
       res.send('✅ Server is running.');
     });
@@ -82,7 +95,7 @@ async function run() {
     await client.db('admin').command({ ping: 1 });
     console.log('✅ MongoDB connected successfully!');
   } finally {
-    // keep connection open
+    // connection remains open for reuse
   }
 }
 run().catch(console.dir);
