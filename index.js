@@ -2,11 +2,13 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const Stripe = require('stripe');
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
@@ -31,6 +33,8 @@ async function run() {
     const upcomingMealsCollection = db.collection('upcomingMeals');
     const mealRequestsCollection = db.collection('mealRequests');
     const reviewsCollection = db.collection('reviews');
+
+    // Your existing routes...
 
     // Get meals with filters & pagination
     app.get('/meals', async (req, res) => {
@@ -197,6 +201,30 @@ async function run() {
       }
     });
 
+    // === Stripe payment intent creation ===
+    app.post('/create-payment-intent', async (req, res) => {
+      const { amount, packageName, userEmail } = req.body;
+      if (!amount || !packageName || !userEmail) {
+        return res.status(400).send({ error: 'Missing required fields' });
+      }
+
+      try {
+        // Stripe expects amount in cents as an integer
+        const amountInCents = Math.round(amount);
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amountInCents,
+          currency: 'usd',
+          metadata: { packageName, userEmail },
+        });
+
+        res.send({ clientSecret: paymentIntent.client_secret });
+      } catch (err) {
+        console.error('Stripe payment intent error:', err);
+        res.status(500).send({ error: 'Failed to create payment intent' });
+      }
+    });
+
     // Health check
     app.get('/', (req, res) => {
       res.send('✅ Server is running.');
@@ -205,7 +233,7 @@ async function run() {
     await client.db('admin').command({ ping: 1 });
     console.log('✅ MongoDB connected successfully!');
   } finally {
-    // Keeping the connection alive
+    // Keeping the connection alive intentionally
   }
 }
 
