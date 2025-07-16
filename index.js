@@ -4,18 +4,18 @@ require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const Stripe = require('stripe');
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// MongoDB URI
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.7ky75a3.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+// Initialize Stripe
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// MongoClient setup
+// MongoDB URI and Client
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.7ky75a3.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -24,19 +24,29 @@ const client = new MongoClient(uri, {
   },
 });
 
-async function run() {
+async function startServer() {
   try {
     await client.connect();
-
     const db = client.db('hostelDB');
+
+    // Collections
+    const usersCollection = db.collection('users');
+    const paymentsCollection = db.collection('payments');
     const mealsCollection = db.collection('meals');
     const upcomingMealsCollection = db.collection('upcomingMeals');
     const mealRequestsCollection = db.collection('mealRequests');
     const reviewsCollection = db.collection('reviews');
 
-    // Your existing routes...
+    console.log('✅ Connected to MongoDB');
 
-    // Get meals with filters & pagination
+    // Health Check Route
+    app.get('/', (req, res) => {
+      res.send('✅ Server is running');
+    });
+
+    // --- Meal routes ---
+
+    // Get meals with optional filters, pagination
     app.get('/meals', async (req, res) => {
       try {
         const {
@@ -82,25 +92,40 @@ async function run() {
     // Get single meal by ID
     app.get('/meals/:id', async (req, res) => {
       try {
-        const id = req.params.id;
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: 'Invalid Meal ID format' });
+        }
+
         const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
-        if (!meal) return res.status(404).send({ message: 'Meal not found' });
-        res.send(meal);
+
+        if (!meal) {
+          return res.status(404).json({ message: 'Meal not found' });
+        }
+
+        res.json(meal);
       } catch (error) {
-        console.error('Failed to fetch meal:', error);
-        res.status(500).send({ message: 'Internal Server Error' });
+        console.error('Error fetching meal:', error);
+        res.status(500).json({ message: 'Internal Server Error' });
       }
     });
 
-    // Like a meal
+    // Like a meal (increment likes)
     app.patch('/meals/:id/like', async (req, res) => {
       try {
         const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: 'Invalid Meal ID' });
+        }
         const result = await mealsCollection.updateOne(
           { _id: new ObjectId(id) },
           { $inc: { likes: 1 } }
         );
-        res.send(result);
+        if (result.modifiedCount === 0) {
+          return res.status(404).send({ message: 'Meal not found' });
+        }
+        res.send({ success: true });
       } catch (error) {
         console.error('Failed to like meal:', error);
         res.status(500).send({ message: 'Internal Server Error' });
@@ -114,6 +139,9 @@ async function run() {
         if (!mealId || !userEmail || !userName) {
           return res.status(400).send({ message: 'Missing required fields' });
         }
+        if (!ObjectId.isValid(mealId)) {
+          return res.status(400).send({ message: 'Invalid Meal ID' });
+        }
         const doc = {
           mealId: new ObjectId(mealId),
           userEmail,
@@ -122,7 +150,7 @@ async function run() {
           requestedAt: new Date(),
         };
         const result = await mealRequestsCollection.insertOne(doc);
-        res.send(result);
+        res.send({ success: true, insertedId: result.insertedId });
       } catch (error) {
         console.error('Failed to request meal:', error);
         res.status(500).send({ message: 'Internal Server Error' });
@@ -136,6 +164,9 @@ async function run() {
         if (!mealId || !userEmail || !userName || !comment) {
           return res.status(400).send({ message: 'Missing required fields' });
         }
+        if (!ObjectId.isValid(mealId)) {
+          return res.status(400).send({ message: 'Invalid Meal ID' });
+        }
         const doc = {
           mealId: new ObjectId(mealId),
           userEmail,
@@ -144,7 +175,7 @@ async function run() {
           createdAt: new Date(),
         };
         const result = await reviewsCollection.insertOne(doc);
-        res.send(result);
+        res.send({ success: true, insertedId: result.insertedId });
       } catch (error) {
         console.error('Failed to post review:', error);
         res.status(500).send({ message: 'Internal Server Error' });
@@ -155,6 +186,9 @@ async function run() {
     app.get('/reviews/:mealId', async (req, res) => {
       try {
         const mealId = req.params.mealId;
+        if (!ObjectId.isValid(mealId)) {
+          return res.status(400).send({ message: 'Invalid Meal ID' });
+        }
         const reviews = await reviewsCollection.find({ mealId: new ObjectId(mealId) }).sort({ createdAt: -1 }).toArray();
         res.send(reviews);
       } catch (error) {
@@ -163,7 +197,59 @@ async function run() {
       }
     });
 
-    // Upcoming Meals: Get All
+    // Delete a review by review ID
+    app.delete('/reviews/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(400).send({ message: 'Invalid Review ID' });
+
+        const result = await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
+        if (result.deletedCount === 0) return res.status(404).send({ message: 'Review not found' });
+
+        res.send({ success: true, message: 'Review deleted successfully' });
+      } catch (error) {
+        console.error('Failed to delete review:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    // Get all reviews by userEmail with meal info (My Reviews)
+    app.get('/my-reviews/:userEmail', async (req, res) => {
+      try {
+        const userEmail = req.params.userEmail;
+
+        const reviewsWithMeals = await reviewsCollection.aggregate([
+          { $match: { userEmail } },
+          {
+            $lookup: {
+              from: 'meals',
+              localField: 'mealId',
+              foreignField: '_id',
+              as: 'mealDetails'
+            }
+          },
+          { $unwind: '$mealDetails' },
+          {
+            $project: {
+              _id: 1,
+              comment: 1,
+              createdAt: 1,
+              mealId: 1,
+              mealTitle: '$mealDetails.title',
+              likes: '$mealDetails.likes'
+            }
+          },
+          { $sort: { createdAt: -1 } }
+        ]).toArray();
+
+        res.json(reviewsWithMeals);
+      } catch (error) {
+        console.error('Failed to get user reviews:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    // Upcoming Meals: Get all
     app.get('/upcoming-meals', async (req, res) => {
       try {
         const meals = await upcomingMealsCollection.find().toArray();
@@ -174,11 +260,18 @@ async function run() {
       }
     });
 
-    // Upcoming Meals: Like once per user
+    // Upcoming Meals: Like once per user (email in req.body)
     app.patch('/upcoming-meals/like/:id', async (req, res) => {
-      const mealId = req.params.id;
-      const { email } = req.body;
       try {
+        const mealId = req.params.id;
+        const { email } = req.body;
+        if (!ObjectId.isValid(mealId)) {
+          return res.status(400).send({ message: 'Invalid Meal ID' });
+        }
+        if (!email) {
+          return res.status(400).send({ message: 'Missing user email' });
+        }
+
         const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(mealId) });
         if (!meal) return res.status(404).send({ message: 'Meal not found' });
 
@@ -201,7 +294,9 @@ async function run() {
       }
     });
 
-    // === Stripe payment intent creation ===
+    // --- Stripe Payment and User Badge Update ---
+
+    // Create Payment Intent
     app.post('/create-payment-intent', async (req, res) => {
       const { amount, packageName, userEmail } = req.body;
       if (!amount || !packageName || !userEmail) {
@@ -209,7 +304,7 @@ async function run() {
       }
 
       try {
-        // Stripe expects amount in cents as an integer
+        // Stripe expects amount in cents as integer
         const amountInCents = Math.round(amount);
 
         const paymentIntent = await stripe.paymentIntents.create({
@@ -225,20 +320,72 @@ async function run() {
       }
     });
 
-    // Health check
-    app.get('/', (req, res) => {
-      res.send('✅ Server is running.');
+    // Save payment info and update user's badge
+    app.post('/payments/save', async (req, res) => {
+      const { userEmail, packageName, paymentIntentId, amount, status, purchasedAt } = req.body;
+
+      if (!userEmail || !packageName || !paymentIntentId || !amount || !status || !purchasedAt) {
+        return res.status(400).json({ error: 'Missing payment info' });
+      }
+
+      try {
+        // Insert payment record
+        await paymentsCollection.insertOne({
+          userEmail,
+          packageName,
+          paymentIntentId,
+          amount,
+          status,
+          purchasedAt: new Date(purchasedAt),
+        });
+
+        // Update user's badge in users collection
+        const badgeName = packageName.charAt(0).toUpperCase() + packageName.slice(1);
+
+        const updateResult = await usersCollection.updateOne(
+          { email: userEmail },
+          { $set: { badge: badgeName } }
+        );
+
+        if (updateResult.matchedCount === 0) {
+          console.warn(`User not found with email: ${userEmail}`);
+        }
+
+        res.json({ success: true, message: 'Payment saved and user badge updated' });
+      } catch (err) {
+        console.error('Error saving payment info:', err);
+        res.status(500).json({ error: 'Failed to save payment info' });
+      }
     });
 
-    await client.db('admin').command({ ping: 1 });
-    console.log('✅ MongoDB connected successfully!');
-  } finally {
-    // Keeping the connection alive intentionally
+    // DELETE meal request by ID (cancel request)
+    app.delete('/meal-requests/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: 'Invalid Request ID' });
+        }
+
+        const result = await mealRequestsCollection.deleteOne({ _id: new ObjectId(id) });
+        if (result.deletedCount === 0) {
+          return res.status(404).send({ message: 'Request not found' });
+        }
+
+        res.send({ success: true, message: 'Request cancelled successfully' });
+      } catch (error) {
+        console.error('Failed to delete meal request:', error);
+        res.status(500).send({ message: 'Internal Server Error' });
+      }
+    });
+
+    // Start Express server
+    app.listen(PORT, () => {
+      console.log(`🚀 Server is running on port ${PORT}`);
+    });
+
+  } catch (err) {
+    console.error('Failed to connect to MongoDB:', err);
   }
 }
 
-run().catch(console.dir);
-
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
+startServer();
