@@ -40,7 +40,7 @@ async function startServer() {
       res.send('✅ Server is running');
     });
 
-    // *** NEW: Get user by email (for badge fetching) ***
+    // ✅ Get user by email
     app.get('/users/:email', async (req, res) => {
       const { email } = req.params;
       try {
@@ -52,7 +52,7 @@ async function startServer() {
       }
     });
 
-    // ------------------- MEALS -------------------
+    // ✅ Meals with search, filter, pagination
     app.get('/meals', async (req, res) => {
       const { search = '', category, minPrice, maxPrice, page = 1, limit = 6 } = req.query;
       const query = {};
@@ -66,7 +66,6 @@ async function startServer() {
       }
 
       if (category && category !== 'All') query.category = category;
-
       if (minPrice || maxPrice) {
         query.price = {};
         if (minPrice) query.price.$gte = parseFloat(minPrice);
@@ -80,6 +79,7 @@ async function startServer() {
       res.send({ total, page: parseInt(page), meals });
     });
 
+    // ✅ Get single meal
     app.get('/meals/:id', async (req, res) => {
       const { id } = req.params;
       try {
@@ -91,6 +91,7 @@ async function startServer() {
       }
     });
 
+    // ✅ Like a meal
     app.patch('/meals/:id/like', async (req, res) => {
       const { id } = req.params;
       if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid meal ID' });
@@ -104,7 +105,7 @@ async function startServer() {
       res.send({ success: true });
     });
 
-    // ------------------- MEAL REQUESTS -------------------
+    // ✅ Meal Request
     app.post('/meal-requests', async (req, res) => {
       const { mealId, userEmail, userName } = req.body;
       if (!mealId || !userEmail || !userName) {
@@ -132,7 +133,7 @@ async function startServer() {
       res.send({ success: true, message: 'Request cancelled' });
     });
 
-    // ------------------- REVIEWS -------------------
+    // ✅ Review a meal
     app.post('/reviews', async (req, res) => {
       const { mealId, userEmail, userName, comment } = req.body;
       if (!mealId || !userEmail || !userName || !comment) {
@@ -207,7 +208,7 @@ async function startServer() {
       res.send(reviews);
     });
 
-    // ------------------- UPCOMING MEALS -------------------
+    // ✅ Upcoming Meals (Premium only like)
     app.get('/upcoming-meals', async (req, res) => {
       try {
         const meals = await upcomingMealsCollection
@@ -216,7 +217,6 @@ async function startServer() {
           .toArray();
         res.send(meals);
       } catch (err) {
-        console.error('Error fetching upcoming meals:', err);
         res.status(500).json({ message: 'Failed to fetch upcoming meals' });
       }
     });
@@ -232,39 +232,33 @@ async function startServer() {
       try {
         const user = await usersCollection.findOne({ email: userEmail });
 
-        // Validate user and premium badge
         const premiumBadges = ['Silver', 'Gold', 'Platinum'];
         if (!user || !premiumBadges.includes(user.badge)) {
           return res.status(403).json({ message: 'Only premium users can like meals' });
         }
 
-        // Check if already liked
         const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(id) });
-        if (!meal) {
-          return res.status(404).json({ message: 'Meal not found' });
-        }
+        if (!meal) return res.status(404).json({ message: 'Meal not found' });
 
         if (meal.likedBy?.includes(userEmail)) {
           return res.status(400).json({ message: 'You already liked this meal' });
         }
 
-        // Update meal
-        const result = await upcomingMealsCollection.updateOne(
+        await upcomingMealsCollection.updateOne(
           { _id: new ObjectId(id) },
           {
             $inc: { likes: 1 },
-            $addToSet: { likedBy: userEmail }, // avoids duplicates
+            $addToSet: { likedBy: userEmail },
           }
         );
 
         res.send({ success: true, message: 'Meal liked' });
       } catch (error) {
-        console.error('Like error:', error);
         res.status(500).json({ message: 'Server error' });
       }
     });
 
-    // ------------------- PAYMENTS -------------------
+    // ✅ Stripe Payment Integration
     app.post('/create-payment-intent', async (req, res) => {
       const { amount, packageName, userEmail } = req.body;
       if (!amount || !packageName || !userEmail) {
@@ -280,6 +274,7 @@ async function startServer() {
       res.send({ clientSecret: paymentIntent.client_secret });
     });
 
+    // ✅ Save Payment + Assign Badge
     app.post('/payments/save', async (req, res) => {
       const { userEmail, packageName, paymentIntentId, amount, status, purchasedAt } = req.body;
 
@@ -299,10 +294,10 @@ async function startServer() {
       const badge = packageName.charAt(0).toUpperCase() + packageName.slice(1);
       await usersCollection.updateOne({ email: userEmail }, { $set: { badge } });
 
-      res.send({ success: true, message: 'Payment recorded and badge updated' });
+      res.send({ success: true, message: 'Payment recorded', badge });
     });
 
-    // ------------------- Start Server -------------------
+    // ✅ Start Server
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
