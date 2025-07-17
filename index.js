@@ -40,6 +40,18 @@ async function startServer() {
       res.send('✅ Server is running');
     });
 
+    // *** NEW: Get user by email (for badge fetching) ***
+    app.get('/users/:email', async (req, res) => {
+      const { email } = req.params;
+      try {
+        const user = await usersCollection.findOne({ email });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        res.json(user);
+      } catch (error) {
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
     // ------------------- MEALS -------------------
     app.get('/meals', async (req, res) => {
       const { search = '', category, minPrice, maxPrice, page = 1, limit = 6 } = req.query;
@@ -68,18 +80,16 @@ async function startServer() {
       res.send({ total, page: parseInt(page), meals });
     });
 
-app.get('/meals/:id', async (req, res) => {
-  const { id } = req.params;
-
-  if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid meal ID' });
-
-  const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
-  if (!meal) return res.status(404).json({ message: 'Meal not found' });
-
-  res.json(meal);
-});
-
-
+    app.get('/meals/:id', async (req, res) => {
+      const { id } = req.params;
+      try {
+        const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+        if (!meal) return res.status(404).json({ message: 'Meal not found' });
+        res.json(meal);
+      } catch (err) {
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
 
     app.patch('/meals/:id/like', async (req, res) => {
       const { id } = req.params;
@@ -199,34 +209,59 @@ app.get('/meals/:id', async (req, res) => {
 
     // ------------------- UPCOMING MEALS -------------------
     app.get('/upcoming-meals', async (req, res) => {
-      const meals = await upcomingMealsCollection.find().toArray();
-      res.send(meals);
+      try {
+        const meals = await upcomingMealsCollection
+          .find()
+          .sort({ publishDate: 1 })
+          .toArray();
+        res.send(meals);
+      } catch (err) {
+        console.error('Error fetching upcoming meals:', err);
+        res.status(500).json({ message: 'Failed to fetch upcoming meals' });
+      }
     });
 
-    app.patch('/upcoming-meals/like/:id', async (req, res) => {
-      const mealId = req.params.id;
-      const { email } = req.body;
+    app.patch('/upcoming-meals/:id/like', async (req, res) => {
+      const { id } = req.params;
+      const { userEmail } = req.body;
 
-      if (!ObjectId.isValid(mealId) || !email) {
-        return res.status(400).json({ message: 'Invalid input' });
+      if (!ObjectId.isValid(id) || !userEmail) {
+        return res.status(400).json({ message: 'Invalid meal ID or user email' });
       }
 
-      const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(mealId) });
-      if (!meal) return res.status(404).json({ message: 'Meal not found' });
+      try {
+        const user = await usersCollection.findOne({ email: userEmail });
 
-      if (meal.likedBy?.includes(email)) {
-        return res.send({ success: false, message: 'Already liked' });
-      }
-
-      const result = await upcomingMealsCollection.updateOne(
-        { _id: new ObjectId(mealId) },
-        {
-          $inc: { likes: 1 },
-          $addToSet: { likedBy: email },
+        // Validate user and premium badge
+        const premiumBadges = ['Silver', 'Gold', 'Platinum'];
+        if (!user || !premiumBadges.includes(user.badge)) {
+          return res.status(403).json({ message: 'Only premium users can like meals' });
         }
-      );
 
-      res.send({ success: result.modifiedCount > 0 });
+        // Check if already liked
+        const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(id) });
+        if (!meal) {
+          return res.status(404).json({ message: 'Meal not found' });
+        }
+
+        if (meal.likedBy?.includes(userEmail)) {
+          return res.status(400).json({ message: 'You already liked this meal' });
+        }
+
+        // Update meal
+        const result = await upcomingMealsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $inc: { likes: 1 },
+            $addToSet: { likedBy: userEmail }, // avoids duplicates
+          }
+        );
+
+        res.send({ success: true, message: 'Meal liked' });
+      } catch (error) {
+        console.error('Like error:', error);
+        res.status(500).json({ message: 'Server error' });
+      }
     });
 
     // ------------------- PAYMENTS -------------------
