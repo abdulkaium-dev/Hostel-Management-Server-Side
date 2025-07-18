@@ -55,6 +55,20 @@ async function startServer() {
         res.status(500).json({ message: 'Server error' });
       }
     });
+      
+
+   // ✅ Admin check route
+app.get("/api/users/admin/:email", async (req, res) => {
+  try {
+    const email = req.params.email;
+    const user = await usersCollection.findOne({ email });
+    res.send({ isAdmin: user?.role === "admin" });
+  } catch (err) {
+    console.error("Failed to check admin status:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 
     // My Profile route (limited info)
     app.get('/my-profile/:email', async (req, res) => {
@@ -155,7 +169,7 @@ async function startServer() {
 
     // --- Meal Requests Routes ---
 
-    // Request a meal
+       // Request a meal
     app.post('/meal-requests', async (req, res) => {
       try {
         const { mealId, userEmail, userName } = req.body;
@@ -183,7 +197,7 @@ async function startServer() {
       }
     });
 
-    // Delete (cancel) a meal request
+     // Delete (cancel) a meal request
     app.delete('/meal-requests/:id', async (req, res) => {
       try {
         const { id } = req.params;
@@ -199,7 +213,7 @@ async function startServer() {
       }
     });
 
-    // Get all requested meals for a user with meal details
+     // Get all requested meals for a user with meal details
     app.get('/requested-meals/:userEmail', async (req, res) => {
       try {
         const requests = await mealRequestsCollection
@@ -486,6 +500,28 @@ async function startServer() {
         await usersCollection.updateOne({ email: userEmail }, { $set: { badge } });
 
         res.json({ success: true, badge });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // --- NEW: Get payment history for a user ---
+    app.get('/payments/:userEmail', async (req, res) => {
+      try {
+        const { userEmail } = req.params;
+        if (!userEmail) return res.status(400).json({ message: 'User email required' });
+
+        const payments = await paymentsCollection
+          .find({ userEmail })
+          .sort({ purchasedAt: -1 })
+          .toArray();
+
+        if (!payments.length) {
+          return res.json({ message: 'No payment history found', payments: [] });
+        }
+
+        res.json({ payments });
       } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server error' });
