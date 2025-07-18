@@ -25,6 +25,8 @@ const client = new MongoClient(uri, {
 async function startServer() {
   try {
     await client.connect();
+    console.log('✅ Connected to MongoDB');
+
     const db = client.db('hostelDB');
 
     // Collections
@@ -40,269 +42,461 @@ async function startServer() {
       res.send('✅ Server is running');
     });
 
-    // ✅ Get user by email
+    // --- User Routes ---
+
+    // Get user info by email
     app.get('/users/:email', async (req, res) => {
-      const { email } = req.params;
       try {
-        const user = await usersCollection.findOne({ email });
+        const user = await usersCollection.findOne({ email: req.params.email });
         if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
-      } catch (error) {
+      } catch (err) {
+        console.error(err);
         res.status(500).json({ message: 'Server error' });
       }
     });
 
-    // ✅ Meals with search, filter, pagination
-    app.get('/meals', async (req, res) => {
-      const { search = '', category, minPrice, maxPrice, page = 1, limit = 6 } = req.query;
-      const query = {};
-
-      if (search) {
-        query.$or = [
-          { title: { $regex: search, $options: 'i' } },
-          { description: { $regex: search, $options: 'i' } },
-          { category: { $regex: search, $options: 'i' } },
-        ];
+    // My Profile route (limited info)
+    app.get('/my-profile/:email', async (req, res) => {
+      try {
+        const user = await usersCollection.findOne(
+          { email: req.params.email },
+          { projection: { displayName: 1, photoURL: 1, email: 1, badge: 1 } }
+        );
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        res.json({
+          name: user.displayName || '',
+          image: user.photoURL || '',
+          email: user.email,
+          badge: user.badge || 'Bronze',
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
       }
-
-      if (category && category !== 'All') query.category = category;
-      if (minPrice || maxPrice) {
-        query.price = {};
-        if (minPrice) query.price.$gte = parseFloat(minPrice);
-        if (maxPrice) query.price.$lte = parseFloat(maxPrice);
-      }
-
-      const skip = (parseInt(page) - 1) * parseInt(limit);
-      const total = await mealsCollection.countDocuments(query);
-      const meals = await mealsCollection.find(query).skip(skip).limit(parseInt(limit)).toArray();
-
-      res.send({ total, page: parseInt(page), meals });
     });
 
-    // ✅ Get single meal
-    app.get('/meals/:id', async (req, res) => {
-      const { id } = req.params;
+    // --- Meals Routes ---
+
+    // Get meals with search, filter, pagination
+    app.get('/meals', async (req, res) => {
       try {
+        const { search = '', category, minPrice, maxPrice, page = 1, limit = 6 } = req.query;
+        const query = {};
+
+        if (search) {
+          query.$or = [
+            { title: { $regex: search, $options: 'i' } },
+            { description: { $regex: search, $options: 'i' } },
+            { category: { $regex: search, $options: 'i' } },
+          ];
+        }
+        if (category && category !== 'All') query.category = category;
+        if (minPrice || maxPrice) {
+          query.price = {};
+          if (minPrice) query.price.$gte = parseFloat(minPrice);
+          if (maxPrice) query.price.$lte = parseFloat(maxPrice);
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const total = await mealsCollection.countDocuments(query);
+        const meals = await mealsCollection.find(query).skip(skip).limit(parseInt(limit)).toArray();
+
+        res.json({ total, page: parseInt(page), meals });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // Get meal by ID
+    app.get('/meals/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+
         const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
         if (!meal) return res.status(404).json({ message: 'Meal not found' });
+
         res.json(meal);
       } catch (err) {
+        console.error(err);
         res.status(500).json({ message: 'Server error' });
       }
     });
 
-    // ✅ Like a meal
+    // Like a meal (only once per user)
     app.patch('/meals/:id/like', async (req, res) => {
-      const { id } = req.params;
-      if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid meal ID' });
+      try {
+        const { id } = req.params;
+        const { userEmail } = req.body;
 
-      const result = await mealsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $inc: { likes: 1 } }
-      );
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+        if (!userEmail) return res.status(400).json({ message: 'User email required' });
 
-      if (result.modifiedCount === 0) return res.status(404).json({ message: 'Meal not found' });
-      res.send({ success: true });
+        const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+        if (!meal) return res.status(404).json({ message: 'Meal not found' });
+
+        if (meal.likedBy?.includes(userEmail)) {
+          return res.status(400).json({ message: 'Already liked' });
+        }
+
+        await mealsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $inc: { likes: 1 }, $addToSet: { likedBy: userEmail } }
+        );
+
+        res.json({ success: true });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
     });
 
-    // ✅ Meal Request
+    // --- Meal Requests Routes ---
+
+    // Request a meal
     app.post('/meal-requests', async (req, res) => {
-      const { mealId, userEmail, userName } = req.body;
-      if (!mealId || !userEmail || !userName) {
-        return res.status(400).json({ message: 'Missing required fields' });
-      }
+      try {
+        const { mealId, userEmail, userName } = req.body;
+        if (!mealId || !userEmail || !userName)
+          return res.status(400).json({ message: 'Missing fields' });
 
-      const doc = {
-        mealId: new ObjectId(mealId),
-        userEmail,
-        userName,
-        status: 'pending',
-        requestedAt: new Date(),
-      };
-      const result = await mealRequestsCollection.insertOne(doc);
-      res.send({ success: true, insertedId: result.insertedId });
+        const exists = await mealRequestsCollection.findOne({
+          mealId: new ObjectId(mealId),
+          userEmail,
+        });
+        if (exists) return res.status(400).json({ message: 'Already requested this meal' });
+
+        const result = await mealRequestsCollection.insertOne({
+          mealId: new ObjectId(mealId),
+          userEmail,
+          userName,
+          status: 'pending',
+          requestedAt: new Date(),
+        });
+
+        res.json({ success: true, insertedId: result.insertedId });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
     });
 
+    // Delete (cancel) a meal request
     app.delete('/meal-requests/:id', async (req, res) => {
-      const { id } = req.params;
-      if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid request ID' });
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
 
-      const result = await mealRequestsCollection.deleteOne({ _id: new ObjectId(id) });
-      if (result.deletedCount === 0) return res.status(404).json({ message: 'Request not found' });
+        const result = await mealRequestsCollection.deleteOne({ _id: new ObjectId(id) });
+        if (!result.deletedCount) return res.status(404).json({ message: 'Not found' });
 
-      res.send({ success: true, message: 'Request cancelled' });
-    });
-
-    // ✅ Review a meal
-    app.post('/reviews', async (req, res) => {
-      const { mealId, userEmail, userName, comment } = req.body;
-      if (!mealId || !userEmail || !userName || !comment) {
-        return res.status(400).json({ message: 'Missing required fields' });
+        res.json({ success: true });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
       }
-
-      const review = {
-        mealId: new ObjectId(mealId),
-        userEmail,
-        userName,
-        comment,
-        createdAt: new Date(),
-      };
-
-      const result = await reviewsCollection.insertOne(review);
-      await mealsCollection.updateOne(
-        { _id: new ObjectId(mealId) },
-        { $inc: { reviewCount: 1 } }
-      );
-
-      res.send({ success: true, insertedId: result.insertedId });
     });
 
+    // Get all requested meals for a user with meal details
+    app.get('/requested-meals/:userEmail', async (req, res) => {
+      try {
+        const requests = await mealRequestsCollection
+          .aggregate([
+            { $match: { userEmail: req.params.userEmail } },
+            {
+              $lookup: {
+                from: 'meals',
+                localField: 'mealId',
+                foreignField: '_id',
+                as: 'mealDetails',
+              },
+            },
+            { $unwind: '$mealDetails' },
+            {
+              $project: {
+                _id: 1,
+                status: 1,
+                requestedAt: 1,
+                mealTitle: '$mealDetails.title',
+                likes: '$mealDetails.likes',
+                reviewCount: '$mealDetails.reviewCount',
+              },
+            },
+            { $sort: { requestedAt: -1 } },
+          ])
+          .toArray();
+
+        res.json(requests);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // --- Reviews Routes ---
+
+    // Post a review
+    app.post('/reviews', async (req, res) => {
+      try {
+        const { mealId, userEmail, userName, comment } = req.body;
+        if (!mealId || !userEmail || !userName || !comment)
+          return res.status(400).json({ message: 'Missing fields' });
+
+        await reviewsCollection.insertOne({
+          mealId: new ObjectId(mealId),
+          userEmail,
+          userName,
+          comment,
+          createdAt: new Date(),
+        });
+
+        await mealsCollection.updateOne(
+          { _id: new ObjectId(mealId) },
+          { $inc: { reviewCount: 1 } }
+        );
+
+        res.json({ success: true });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // Get reviews for a meal
     app.get('/reviews/:mealId', async (req, res) => {
-      const { mealId } = req.params;
-      if (!ObjectId.isValid(mealId)) return res.status(400).json({ message: 'Invalid meal ID' });
+      try {
+        const { mealId } = req.params;
+        if (!ObjectId.isValid(mealId)) return res.status(400).json({ message: 'Invalid ID' });
 
-      const reviews = await reviewsCollection
-        .find({ mealId: new ObjectId(mealId) })
-        .sort({ createdAt: -1 })
-        .toArray();
+        const reviews = await reviewsCollection
+          .find({ mealId: new ObjectId(mealId) })
+          .sort({ createdAt: -1 })
+          .toArray();
 
-      res.send(reviews);
+        res.json(reviews);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
     });
 
-    app.delete('/reviews/:id', async (req, res) => {
-      const { id } = req.params;
-      if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid review ID' });
-
-      const result = await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
-      if (result.deletedCount === 0) return res.status(404).json({ message: 'Review not found' });
-
-      res.send({ success: true });
-    });
-
+    // Get reviews by user (with meal info and mealId)
     app.get('/my-reviews/:userEmail', async (req, res) => {
-      const { userEmail } = req.params;
+      try {
+        const reviews = await reviewsCollection
+          .aggregate([
+            { $match: { userEmail: req.params.userEmail } },
+            {
+              $lookup: {
+                from: 'meals',
+                localField: 'mealId',
+                foreignField: '_id',
+                as: 'mealDetails',
+              },
+            },
+            { $unwind: '$mealDetails' },
+            {
+              $project: {
+                _id: 1,
+                comment: 1,
+                createdAt: 1,
+                mealId: '$mealDetails._id',
+                mealTitle: '$mealDetails.title',
+                likes: '$mealDetails.likes',
+              },
+            },
+            { $sort: { createdAt: -1 } },
+          ])
+          .toArray();
 
-      const reviews = await reviewsCollection.aggregate([
-        { $match: { userEmail } },
-        {
-          $lookup: {
-            from: 'meals',
-            localField: 'mealId',
-            foreignField: '_id',
-            as: 'mealDetails',
-          },
-        },
-        { $unwind: '$mealDetails' },
-        {
-          $project: {
-            _id: 1,
-            comment: 1,
-            createdAt: 1,
-            mealTitle: '$mealDetails.title',
-            likes: '$mealDetails.likes',
-          },
-        },
-        { $sort: { createdAt: -1 } },
-      ]).toArray();
-
-      res.send(reviews);
+        res.json(reviews);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
     });
 
-    // ✅ Upcoming Meals (Premium only like)
+    // Delete a review by ID (with decrement reviewCount)
+    app.delete('/reviews/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+
+        const review = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+        if (!review) return res.status(404).json({ message: 'Review not found' });
+
+        const result = await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
+        if (!result.deletedCount) return res.status(404).json({ message: 'Review not found' });
+
+        await mealsCollection.updateOne(
+          { _id: review.mealId },
+          { $inc: { reviewCount: -1 } }
+        );
+
+        res.json({ success: true });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // --- Edit Review Routes ---
+
+    // Get review by ID (for Edit page)
+    app.get('/reviews/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+
+        const review = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+        if (!review) return res.status(404).json({ message: 'Review not found' });
+
+        res.json(review);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // Update a review by ID (Edit review)
+    app.put('/reviews/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { comment } = req.body;
+
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid review ID' });
+        if (!comment || comment.trim() === '') return res.status(400).json({ message: 'Comment cannot be empty' });
+
+        const review = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+        if (!review) return res.status(404).json({ message: 'Review not found' });
+
+        const updateResult = await reviewsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { comment: comment.trim() } }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+          return res.status(400).json({ message: 'No changes made to the review' });
+        }
+
+        res.json({ success: true, message: 'Review updated successfully' });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // --- Upcoming Meals Routes ---
+
+    // Get upcoming meals
     app.get('/upcoming-meals', async (req, res) => {
       try {
-        const meals = await upcomingMealsCollection
-          .find()
-          .sort({ publishDate: 1 })
-          .toArray();
-        res.send(meals);
+        const meals = await upcomingMealsCollection.find().sort({ publishDate: 1 }).toArray();
+        res.json(meals);
       } catch (err) {
-        res.status(500).json({ message: 'Failed to fetch upcoming meals' });
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
       }
     });
 
+    // Like upcoming meal (premium users only)
     app.patch('/upcoming-meals/:id/like', async (req, res) => {
-      const { id } = req.params;
-      const { userEmail } = req.body;
-
-      if (!ObjectId.isValid(id) || !userEmail) {
-        return res.status(400).json({ message: 'Invalid meal ID or user email' });
-      }
-
       try {
-        const user = await usersCollection.findOne({ email: userEmail });
+        const { id } = req.params;
+        const { userEmail } = req.body;
 
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+        if (!userEmail) return res.status(400).json({ message: 'User email required' });
+
+        const user = await usersCollection.findOne({ email: userEmail });
         const premiumBadges = ['Silver', 'Gold', 'Platinum'];
-        if (!user || !premiumBadges.includes(user.badge)) {
-          return res.status(403).json({ message: 'Only premium users can like meals' });
-        }
+
+        if (!user || !premiumBadges.includes(user.badge))
+          return res.status(403).json({ message: 'Not premium' });
 
         const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(id) });
         if (!meal) return res.status(404).json({ message: 'Meal not found' });
 
         if (meal.likedBy?.includes(userEmail)) {
-          return res.status(400).json({ message: 'You already liked this meal' });
+          return res.status(400).json({ message: 'Already liked' });
         }
 
         await upcomingMealsCollection.updateOne(
           { _id: new ObjectId(id) },
-          {
-            $inc: { likes: 1 },
-            $addToSet: { likedBy: userEmail },
-          }
+          { $inc: { likes: 1 }, $addToSet: { likedBy: userEmail } }
         );
 
-        res.send({ success: true, message: 'Meal liked' });
-      } catch (error) {
+        res.json({ success: true });
+      } catch (err) {
+        console.error(err);
         res.status(500).json({ message: 'Server error' });
       }
     });
 
-    // ✅ Stripe Payment Integration
+    // --- Stripe Payment Routes ---
+
+    // Create Stripe payment intent
     app.post('/create-payment-intent', async (req, res) => {
-      const { amount, packageName, userEmail } = req.body;
-      if (!amount || !packageName || !userEmail) {
-        return res.status(400).json({ message: 'Missing fields' });
+      try {
+        const { amount, packageName, userEmail } = req.body;
+        if (!amount || !packageName || !userEmail)
+          return res.status(400).json({ message: 'Missing fields' });
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(amount),
+          currency: 'usd',
+          metadata: { packageName, userEmail },
+        });
+
+        res.json({ clientSecret: paymentIntent.client_secret });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Stripe error' });
       }
-
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(amount),
-        currency: 'usd',
-        metadata: { packageName, userEmail },
-      });
-
-      res.send({ clientSecret: paymentIntent.client_secret });
     });
 
-    // ✅ Save Payment + Assign Badge
+    // Save payment info & update user badge
     app.post('/payments/save', async (req, res) => {
-      const { userEmail, packageName, paymentIntentId, amount, status, purchasedAt } = req.body;
+      try {
+        const { userEmail, packageName, paymentIntentId, amount, status, purchasedAt } = req.body;
+        if (
+          !userEmail ||
+          !packageName ||
+          !paymentIntentId ||
+          !amount ||
+          !status ||
+          !purchasedAt
+        ) {
+          return res.status(400).json({ error: 'Missing payment info' });
+        }
 
-      if (!userEmail || !packageName || !paymentIntentId || !amount || !status || !purchasedAt) {
-        return res.status(400).json({ error: 'Missing payment info' });
+        await paymentsCollection.insertOne({
+          userEmail,
+          packageName,
+          paymentIntentId,
+          amount,
+          status,
+          purchasedAt: new Date(purchasedAt),
+        });
+
+        // Capitalize badge name and update user
+        const badge = packageName.charAt(0).toUpperCase() + packageName.slice(1);
+        await usersCollection.updateOne({ email: userEmail }, { $set: { badge } });
+
+        res.json({ success: true, badge });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
       }
-
-      await paymentsCollection.insertOne({
-        userEmail,
-        packageName,
-        paymentIntentId,
-        amount,
-        status,
-        purchasedAt: new Date(purchasedAt),
-      });
-
-      const badge = packageName.charAt(0).toUpperCase() + packageName.slice(1);
-      await usersCollection.updateOne({ email: userEmail }, { $set: { badge } });
-
-      res.send({ success: true, message: 'Payment recorded', badge });
     });
 
-    // ✅ Start Server
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
-  } catch (error) {
-    console.error('❌ Failed to connect to MongoDB:', error);
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err);
   }
 }
 
