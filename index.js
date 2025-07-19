@@ -45,7 +45,7 @@ async function startServer() {
     // --- User Routes ---
 
     // Get user info by email
-    app.get('/users/:email', async (req, res) => {
+     app.get('/users/:email', async (req, res) => {
       try {
         const user = await usersCollection.findOne({ email: req.params.email });
         if (!user) return res.status(404).json({ message: 'User not found' });
@@ -55,22 +55,37 @@ async function startServer() {
         res.status(500).json({ message: 'Server error' });
       }
     });
-      
 
-   // ✅ Admin check route
-app.get("/api/users/admin/:email", async (req, res) => {
-  try {
-    const email = req.params.email;
-    const user = await usersCollection.findOne({ email });
-    res.send({ isAdmin: user?.role === "admin" });
-  } catch (err) {
-    console.error("Failed to check admin status:", err);
-    res.status(500).json({ message: "Server error" });
-  }
+        // Upsert user on login/register
+ // POST /users/upsert
+app.post("/users/upsert", async (req, res) => {
+  const { email, displayName, photoURL } = req.body;
+  if (!email) return res.status(400).json({ message: "Email is required" });
+
+  const update = {
+    $setOnInsert: { badge: "Bronze", role: "user" }, // set default on first insert
+    $set: { displayName, photoURL },
+  };
+
+  await usersCollection.updateOne({ email }, update, { upsert: true });
+  res.json({ success: true });
 });
 
 
-    // My Profile route (limited info)
+   // ✅ Admin check route
+    app.get('/api/users/admin/:email', async (req, res) => {
+      try {
+        const email = req.params.email;
+        const user = await usersCollection.findOne({ email });
+        res.send({ isAdmin: user?.role === 'admin' });
+      } catch (err) {
+        console.error('Failed to check admin status:', err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+
+       // My Profile route (limited info)
     app.get('/my-profile/:email', async (req, res) => {
       try {
         const user = await usersCollection.findOne(
