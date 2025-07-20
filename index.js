@@ -45,16 +45,49 @@ async function startServer() {
     // --- User Routes ---
 
     // Get user info by email
-     app.get('/users/:email', async (req, res) => {
-      try {
-        const user = await usersCollection.findOne({ email: req.params.email });
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        res.json(user);
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
+app.get('/users/:email', async (req, res) => {
+  try {
+    const user = await usersCollection.findOne({ email: req.params.email });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+    // ✅ PATCH: Update user badge manually (admin or system can use this)
+app.patch('/users/:email/badge', async (req, res) => {
+  const email = req.params.email;
+  const { badge } = req.body;
+
+  const allowedBadges = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+  if (!badge || !allowedBadges.includes(badge)) {
+    return res.status(400).json({ message: 'Invalid or missing badge value' });
+  }
+
+  try {
+    const user = await usersCollection.findOne({ email });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Optional: Only allow admin to change badges
+    if (user.role !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden: Admin access required to update badge' });
+    }
+
+    const result = await usersCollection.updateOne(
+      { email },
+      { $set: { badge } }
+    );
+
+    res.json({ success: true, message: `Badge updated to ${badge}` });
+  } catch (err) {
+    console.error('Error updating badge:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 
         // Upsert user on login/register
  // POST /users/upsert
@@ -63,13 +96,15 @@ app.post("/users/upsert", async (req, res) => {
   if (!email) return res.status(400).json({ message: "Email is required" });
 
   const update = {
-    $setOnInsert: { badge: "Bronze", role: "user" }, // set default on first insert
+    $setOnInsert: { badge: "Bronze", role: "user" },
     $set: { displayName, photoURL },
   };
 
   await usersCollection.updateOne({ email }, update, { upsert: true });
   res.json({ success: true });
 });
+
+
 
 
    // ✅ Admin check route
@@ -83,6 +118,33 @@ app.post("/users/upsert", async (req, res) => {
         res.status(500).json({ message: 'Server error' });
       }
     });
+
+    // Get Admin Profile (by email)
+app.get('/admin/profile/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    // Find admin user by email and confirm role is admin
+    const adminUser = await usersCollection.findOne({ email, role: 'admin' });
+    if (!adminUser) {
+      return res.status(404).json({ message: 'Admin user not found' });
+    }
+
+    // Count meals added by this admin (assuming meals have addedByEmail field)
+    const mealsAddedCount = await mealsCollection.countDocuments({ addedByEmail: email });
+
+    res.json({
+      name: adminUser.displayName || '',
+      image: adminUser.photoURL || '',
+      email: adminUser.email,
+      mealsAddedCount,
+    });
+  } catch (err) {
+    console.error('Error fetching admin profile:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 
 
        // My Profile route (limited info)
@@ -183,86 +245,116 @@ app.post("/users/upsert", async (req, res) => {
     });
 
     // --- Meal Requests Routes ---
+// ✅ POST: Create a new meal request
+app.post('/meal-requests', async (req, res) => {
+  try {
+    const { mealId, userEmail, userName } = req.body;
 
-       // Request a meal
-    app.post('/meal-requests', async (req, res) => {
-      try {
-        const { mealId, userEmail, userName } = req.body;
-        if (!mealId || !userEmail || !userName)
-          return res.status(400).json({ message: 'Missing fields' });
+    if (!mealId || !userEmail || !userName) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
 
-        const exists = await mealRequestsCollection.findOne({
-          mealId: new ObjectId(mealId),
-          userEmail,
-        });
-        if (exists) return res.status(400).json({ message: 'Already requested this meal' });
+    // Fetch the user from the database by email
+    const user = await usersCollection.findOne({ email: userEmail });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
 
-        const result = await mealRequestsCollection.insertOne({
-          mealId: new ObjectId(mealId),
-          userEmail,
-          userName,
-          status: 'pending',
-          requestedAt: new Date(),
-        });
+    // Check badge: only allow users with Silver, Gold, or Platinum badge
+    if (!user.badge || user.badge === 'Bronze') {
+      return res.status(403).json({
+        message: 'Only Silver, Gold, or Platinum users can request meals.',
+      });
+    }
 
-        res.json({ success: true, insertedId: result.insertedId });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
+    // Check if user has already requested this meal
+    const existingRequest = await mealRequestsCollection.findOne({
+      mealId: new ObjectId(mealId),
+      userEmail,
     });
 
-     // Delete (cancel) a meal request
-    app.delete('/meal-requests/:id', async (req, res) => {
-      try {
-        const { id } = req.params;
-        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+    if (existingRequest) {
+      return res.status(400).json({ message: 'You have already requested this meal.' });
+    }
 
-        const result = await mealRequestsCollection.deleteOne({ _id: new ObjectId(id) });
-        if (!result.deletedCount) return res.status(404).json({ message: 'Not found' });
-
-        res.json({ success: true });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
+    // Insert new meal request
+    const result = await mealRequestsCollection.insertOne({
+      mealId: new ObjectId(mealId),
+      userEmail,
+      userName,
+      status: 'pending',
+      requestedAt: new Date(),
     });
 
-     // Get all requested meals for a user with meal details
-    app.get('/requested-meals/:userEmail', async (req, res) => {
-      try {
-        const requests = await mealRequestsCollection
-          .aggregate([
-            { $match: { userEmail: req.params.userEmail } },
-            {
-              $lookup: {
-                from: 'meals',
-                localField: 'mealId',
-                foreignField: '_id',
-                as: 'mealDetails',
-              },
-            },
-            { $unwind: '$mealDetails' },
-            {
-              $project: {
-                _id: 1,
-                status: 1,
-                requestedAt: 1,
-                mealTitle: '$mealDetails.title',
-                likes: '$mealDetails.likes',
-                reviewCount: '$mealDetails.reviewCount',
-              },
-            },
-            { $sort: { requestedAt: -1 } },
-          ])
-          .toArray();
+    res.json({ success: true, insertedId: result.insertedId });
+  } catch (err) {
+    console.error('Error creating meal request:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
-        res.json(requests);
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
+
+
+// ✅ Get all requested meals for a user with meal details
+app.get('/requested-meals/:userEmail', async (req, res) => {
+  try {
+    const { userEmail } = req.params;
+
+    const requests = await mealRequestsCollection.aggregate([
+      { $match: { userEmail } },
+      {
+        $lookup: {
+          from: 'meals',
+          localField: 'mealId',
+          foreignField: '_id',
+          as: 'mealDetails',
+        },
+      },
+      { $unwind: '$mealDetails' },
+      {
+        $project: {
+          _id: 1,
+          mealTitle: '$mealDetails.title',
+          likes: '$mealDetails.likes',
+          reviewCount: '$mealDetails.reviewCount',
+          status: 1,
+          requestedAt: 1,
+        },
+      },
+      { $sort: { requestedAt: -1 } }
+    ]).toArray();
+
+    res.json(requests);
+  } catch (err) {
+    console.error('Error fetching requested meals:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+// ✅ Delete (cancel) a meal request
+app.delete('/meal-requests/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid request ID' });
+    }
+
+    const result = await mealRequestsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Meal request not found' });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting meal request:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
 
     // --- Reviews Routes ---
 
