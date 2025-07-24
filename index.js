@@ -106,41 +106,65 @@ app.post("/users/upsert", async (req, res) => {
 
 
 
-
-   // ✅ Admin check route
-    app.get('/api/users/admin/:email', async (req, res) => {
-      try {
-        const email = req.params.email;
-        const user = await usersCollection.findOne({ email });
-        res.send({ isAdmin: user?.role === 'admin' });
-      } catch (err) {
-        console.error('Failed to check admin status:', err);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
-
-    // Get Admin Profile (by email)
-app.get('/admin/profile/:email', async (req, res) => {
+// GET /users?search=&page=1&limit=10
+app.get('/users', async (req, res) => {
   try {
-    const { email } = req.params;
+    const { search = '', page = '1', limit = '10' } = req.query;
 
-    // Find admin user by email and confirm role is admin
-    const adminUser = await usersCollection.findOne({ email, role: 'admin' });
-    if (!adminUser) {
-      return res.status(404).json({ message: 'Admin user not found' });
+    const pageNumber = parseInt(page, 10) || 1;
+    const limitNumber = parseInt(limit, 10) || 10;
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const query = {};
+    if (search) {
+      const searchRegex = new RegExp(search, 'i'); // case-insensitive
+      query.$or = [
+        { displayName: { $regex: searchRegex } },
+        { email: { $regex: searchRegex } },
+      ];
     }
 
-    // Count meals added by this admin (assuming meals have addedByEmail field)
-    const mealsAddedCount = await mealsCollection.countDocuments({ addedByEmail: email });
+    const total = await usersCollection.countDocuments(query);
+    const users = await usersCollection
+      .find(query)
+      .skip(skip)
+      .limit(limitNumber)
+      .project({ displayName: 1, email: 1, role: 1, badge: 1 })
+      .toArray();
 
     res.json({
-      name: adminUser.displayName || '',
-      image: adminUser.photoURL || '',
-      email: adminUser.email,
-      mealsAddedCount,
+      users,
+      total,
+      page: pageNumber,
+      limit: limitNumber,
     });
   } catch (err) {
-    console.error('Error fetching admin profile:', err);
+    console.error('Error fetching users:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// PATCH /users/:id/make-admin - Promote user to admin by ID
+app.patch('/users/:id/make-admin', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid user ID' });
+    }
+
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role: 'admin' } }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({ message: 'User not found or already admin' });
+    }
+
+    res.json({ success: true, message: 'User promoted to admin' });
+  } catch (err) {
+    console.error('Error making user admin:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -200,7 +224,7 @@ app.get('/admin/profile/:email', async (req, res) => {
       }
     });
 
-    // Get meal by ID
+        // Get meal by ID
     app.get('/meals/:id', async (req, res) => {
       try {
         const { id } = req.params;
@@ -215,6 +239,335 @@ app.get('/admin/profile/:email', async (req, res) => {
         res.status(500).json({ message: 'Server error' });
       }
     });
+
+    // ✅ Add a new meal (Admin only)
+app.post('/meals', async (req, res) => {
+  try {
+    const {
+      title,
+      category,
+      image,
+      ingredients,
+      description,
+      price,
+      postTime,
+      distributorName,
+      addedByEmail
+    } = req.body;
+
+    if (
+      !title || !category || !image || !ingredients || !description ||
+      !price || !postTime || !distributorName || !addedByEmail
+    ) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // Optional: check if the user is an admin
+    const admin = await usersCollection.findOne({ email: addedByEmail });
+    if (!admin || admin.role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can add meals' });
+    }
+
+    const newMeal = {
+      title,
+      category,
+      image,
+      ingredients,
+      description,
+      price: parseFloat(price),
+      postTime,
+      distributorName,
+      addedByEmail,
+      likes: 0,
+      reviewCount: 0,
+      rating: 0,
+      likedBy: [], // for tracking like-per-user
+      createdAt: new Date()
+    };
+
+    const result = await mealsCollection.insertOne(newMeal);
+    res.json({ success: true, insertedId: result.insertedId });
+  } catch (err) {
+    console.error('Error adding meal:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
+// GET /all-meals?sortBy=likes|reviewCount|rating&order=asc|desc&page=1&limit=10
+app.get('/all-meals', async (req, res) => {
+  try {
+    const { 
+      sortBy = 'likes', 
+      order = 'desc', 
+      page = '1', 
+      limit = '10' 
+    } = req.query;
+
+    const pageNumber = parseInt(page, 10) || 1;
+    const limitNumber = parseInt(limit, 10) || 10;
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const allowedSortFields = ['likes', 'reviewCount', 'rating'];
+    if (!allowedSortFields.includes(sortBy)) {
+      return res.status(400).json({ message: 'Invalid sort field' });
+    }
+
+    const sortOrder = order === 'asc' ? 1 : -1;
+    const sortCriteria = {};
+    sortCriteria[sortBy] = sortOrder;
+
+    const total = await mealsCollection.countDocuments();
+
+    const meals = await mealsCollection
+      .find({})
+      .sort(sortCriteria)
+      .skip(skip)
+      .limit(limitNumber)
+      .project({
+        title: 1,
+        likes: 1,
+        reviewCount: 1,
+        rating: 1,
+        distributorName: 1,
+      })
+      .toArray();
+
+    res.json({ total, page: pageNumber, limit: limitNumber, meals });
+  } catch (err) {
+    console.error('Error fetching all meals:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
+// Helper function to check if the user is admin
+const verifyAdmin = async (email) => {
+  try {
+    const user = await usersCollection.findOne({ email });
+    return user?.role === 'admin';
+  } catch (error) {
+    console.error('Error verifying admin:', error);
+    return false;
+  }
+};
+// Update meal route (admin only)
+app.put('/meals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      title,
+      category,
+      image,
+      ingredients,
+      description,
+      price,
+      postTime,
+      distributorName,
+      addedByEmail,
+    } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid meal ID' });
+    }
+
+    // Check if user is admin
+    if (!addedByEmail || !(await verifyAdmin(addedByEmail))) {
+      return res.status(403).json({ message: 'Only admins can update meals' });
+    }
+
+    if (
+      !title ||
+      !category ||
+      !image ||
+      !ingredients ||
+      !description ||
+      !price ||
+      !postTime ||
+      !distributorName
+    ) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    const updateDoc = {
+      $set: {
+        title,
+        category,
+        image,
+        ingredients,
+        description,
+        price: parseFloat(price),
+        postTime,
+        distributorName,
+      },
+    };
+
+    const result = await mealsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      updateDoc
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'Meal not found' });
+    }
+
+    res.json({ success: true, message: 'Meal updated successfully' });
+  } catch (err) {
+    console.error('Error updating meal:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+// DELETE Meal (Only for Admins)
+app.delete('/meals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const adminEmail = req.headers['x-admin-email'];
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid meal ID' });
+    }
+
+    if (!adminEmail || !(await verifyAdmin(adminEmail))) {
+      return res.status(403).json({ message: 'Only admins can delete meals' });
+    }
+
+    const result = await mealsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Meal not found' });
+    }
+
+    res.json({ success: true, message: 'Meal deleted successfully' });
+  } catch (err) {
+    console.error('Error deleting meal:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// serve meals route for admins
+app.get('/serve-meals', async (req, res) => {
+  try {
+    const { search = '', page = '1', limit = '10' } = req.query;
+    const pageNumber = parseInt(page, 10);
+    const limitNumber = parseInt(limit, 10);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const searchQuery = search
+      ? {
+          $or: [
+            { userName: { $regex: search, $options: 'i' } },
+            { userEmail: { $regex: search, $options: 'i' } },
+          ],
+        }
+      : {};
+
+    // Aggregate with meal details lookup
+    const pipeline = [
+      { $match: searchQuery },
+      {
+        $lookup: {
+          from: 'meals',
+          localField: 'mealId',
+          foreignField: '_id',
+          as: 'mealDetails',
+        },
+      },
+      { $unwind: '$mealDetails' },
+      {
+        $project: {
+          userName: 1,
+          userEmail: 1,
+          status: 1,
+          mealTitle: '$mealDetails.title',
+        },
+      },
+      { $skip: skip },
+      { $limit: limitNumber },
+    ];
+
+    const requests = await mealRequestsCollection.aggregate(pipeline).toArray();
+
+    const total = await mealRequestsCollection.countDocuments(searchQuery);
+
+    res.json({ total, page: pageNumber, limit: limitNumber, requests });
+  } catch (err) {
+    console.error('Error fetching serve meals:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// PUT /serve-meals/:requestId/serve
+app.put('/serve-meals/:requestId/serve', async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    if (!ObjectId.isValid(requestId)) {
+      return res.status(400).json({ message: 'Invalid request ID' });
+    }
+
+    const result = await mealRequestsCollection.updateOne(
+      { _id: new ObjectId(requestId) },
+      { $set: { status: 'delivered' } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'Meal request not found' });
+    }
+
+    res.json({ success: true, message: 'Meal request marked as delivered' });
+  } catch (err) {
+    console.error('Error updating meal request status:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
+
+   // ✅ Admin check route
+    app.get('/api/users/admin/:email', async (req, res) => {
+      try {
+        const email = req.params.email;
+        const user = await usersCollection.findOne({ email });
+        res.send({ isAdmin: user?.role === 'admin' });
+      } catch (err) {
+        console.error('Failed to check admin status:', err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    // Get Admin Profile (by email)
+app.get('/admin/profile/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    // Find admin user by email and confirm role is admin
+    const adminUser = await usersCollection.findOne({ email, role: 'admin' });
+    if (!adminUser) {
+      return res.status(404).json({ message: 'Admin user not found' });
+    }
+
+    // Count meals added by this admin (assuming meals have addedByEmail field)
+    const mealsAddedCount = await mealsCollection.countDocuments({ addedByEmail: email });
+
+    res.json({
+      name: adminUser.displayName || '',
+      image: adminUser.photoURL || '',
+      email: adminUser.email,
+      mealsAddedCount,
+    });
+  } catch (err) {
+    console.error('Error fetching admin profile:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
+
 
     // Like a meal (only once per user)
     app.patch('/meals/:id/like', async (req, res) => {
@@ -384,6 +737,42 @@ app.delete('/meal-requests/:id', async (req, res) => {
         res.status(500).json({ message: 'Server error' });
       }
     });
+// get all reviews with meals details
+    app.get('/all-reviews', async (req, res) => {
+  try {
+    const reviews = await reviewsCollection.aggregate([
+      {
+        $lookup: {
+          from: 'meals',
+          localField: 'mealId',
+          foreignField: '_id',
+          as: 'mealDetails',
+        },
+      },
+      { $unwind: '$mealDetails' },
+      {
+        $project: {
+          _id: 1,
+          comment: 1,
+          createdAt: 1,
+          userEmail: 1,
+          userName: 1,
+          mealId: '$mealDetails._id',
+          mealTitle: '$mealDetails.title',
+          mealLikes: '$mealDetails.likes',
+          mealReviewCount: '$mealDetails.reviewCount',
+        },
+      },
+      { $sort: { createdAt: -1 } },
+    ]).toArray();
+
+    res.json(reviews);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 
     // Get reviews for a meal
     app.get('/reviews/:mealId', async (req, res) => {
@@ -462,6 +851,7 @@ app.delete('/meal-requests/:id', async (req, res) => {
         res.status(500).json({ message: 'Server error' });
       }
     });
+    
 
     // --- Edit Review Routes ---
 
@@ -511,50 +901,141 @@ app.delete('/meal-requests/:id', async (req, res) => {
 
     // --- Upcoming Meals Routes ---
 
-    // Get upcoming meals
-    app.get('/upcoming-meals', async (req, res) => {
-      try {
-        const meals = await upcomingMealsCollection.find().sort({ publishDate: 1 }).toArray();
-        res.json(meals);
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
+// GET all upcoming meals (sorted by publishDate asc)
+app.get('/upcoming-meals', async (req, res) => {
+  try {
+    const meals = await upcomingMealsCollection
+      .find()
+      .sort({ publishDate: 1 }) // Or use { likes: -1 } for likes sorting
+      .toArray();
+    res.json(meals);
+  } catch (err) {
+    console.error('GET /upcoming-meals error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ==============================
+// PATCH: Like a meal (premium only)
+// ==============================
+app.patch('/upcoming-meals/:id/like', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userEmail } = req.body;
+
+    if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+    if (!userEmail) return res.status(400).json({ message: 'User email required' });
+
+    const user = await usersCollection.findOne({ email: userEmail });
+    const premiumBadges = ['Silver', 'Gold', 'Platinum'];
+
+    if (!user || !premiumBadges.includes(user.badge)) {
+      return res.status(403).json({ message: 'Only premium users can like meals' });
+    }
+
+    const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(id) });
+    if (!meal) return res.status(404).json({ message: 'Meal not found' });
+
+    if (meal.likedBy?.includes(userEmail)) {
+      return res.status(400).json({ message: 'Already liked' });
+    }
+
+    await upcomingMealsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $inc: { likes: 1 },
+        $addToSet: { likedBy: userEmail },
       }
-    });
+    );
 
-    // Like upcoming meal (premium users only)
-    app.patch('/upcoming-meals/:id/like', async (req, res) => {
-      try {
-        const { id } = req.params;
-        const { userEmail } = req.body;
+    res.json({ success: true });
+  } catch (err) {
+    console.error('PATCH /upcoming-meals/:id/like error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
-        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
-        if (!userEmail) return res.status(400).json({ message: 'User email required' });
+// ==============================
+// POST: Add new upcoming meal
+// ==============================
+app.post('/upcoming-meals', async (req, res) => {
+  try {
+    const {
+      title,
+      category,
+      image,
+      ingredients,
+      description,
+      price,
+      publishDate,
+      distributorName,
+    } = req.body;
 
-        const user = await usersCollection.findOne({ email: userEmail });
-        const premiumBadges = ['Silver', 'Gold', 'Platinum'];
+    if (!title || !category || !image || !ingredients || !description || !price || !publishDate || !distributorName) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
 
-        if (!user || !premiumBadges.includes(user.badge))
-          return res.status(403).json({ message: 'Not premium' });
+    const newMeal = {
+      title,
+      category,
+      image,
+      ingredients,
+      description,
+      price: parseFloat(price),
+      publishDate: new Date(publishDate),
+      distributorName,
+      likes: 0,
+      likedBy: [],
+      createdAt: new Date(),
+    };
 
-        const meal = await upcomingMealsCollection.findOne({ _id: new ObjectId(id) });
-        if (!meal) return res.status(404).json({ message: 'Meal not found' });
+    const result = await upcomingMealsCollection.insertOne(newMeal);
+    res.json({ success: true, insertedId: result.insertedId });
+  } catch (err) {
+    console.error('POST /upcoming-meals error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
-        if (meal.likedBy?.includes(userEmail)) {
-          return res.status(400).json({ message: 'Already liked' });
-        }
+// ==============================
+// POST: Publish upcoming meal (move to main mealsCollection)
+// ==============================
+app.post('/upcoming-meals/publish', async (req, res) => {
+  try {
+    const { mealId, addedByEmail } = req.body;
 
-        await upcomingMealsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $inc: { likes: 1 }, $addToSet: { likedBy: userEmail } }
-        );
+    if (!ObjectId.isValid(mealId)) return res.status(400).json({ message: 'Invalid meal ID' });
 
-        res.json({ success: true });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
+    const upcomingMeal = await upcomingMealsCollection.findOne({ _id: new ObjectId(mealId) });
+    if (!upcomingMeal) return res.status(404).json({ message: 'Upcoming meal not found' });
+
+    const mealToAdd = {
+      title: upcomingMeal.title,
+      category: upcomingMeal.category,
+      image: upcomingMeal.image,
+      ingredients: upcomingMeal.ingredients,
+      description: upcomingMeal.description,
+      price: upcomingMeal.price,
+      postTime: new Date(),
+      distributorName: upcomingMeal.distributorName,
+      addedByEmail: addedByEmail || 'admin@example.com',
+      likes: 0,
+      reviewCount: 0,
+      rating: 0,
+      likedBy: [],
+      createdAt: new Date(),
+    };
+
+    await mealsCollection.insertOne(mealToAdd);
+    await upcomingMealsCollection.deleteOne({ _id: new ObjectId(mealId) });
+
+    res.json({ success: true, message: 'Meal published successfully' });
+  } catch (err) {
+    console.error('POST /upcoming-meals/publish error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 
     // --- Stripe Payment Routes ---
 
