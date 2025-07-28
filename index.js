@@ -1,14 +1,41 @@
+
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const Stripe = require('stripe');
+const admin = require('firebase-admin');
+const serviceAccount = require('./firebase-admin-key.json');
 
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 const app = express();
 const PORT = process.env.PORT || 5000;
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // Middleware
+// ✅ Auth Middleware (Firebase JWT Verify)
+const authMiddleware = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Unauthorized: Token Missing" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);  // Verify token
+    req.user = decoded;
+    next();  // Proceed to the route handler
+  } catch (err) {
+    console.error("JWT Verify Error:", err);
+    res.status(403).json({ message: "Invalid or expired token" });
+  }
+};
+
+
+
+
 app.use(cors());
 app.use(express.json());
 
@@ -38,8 +65,75 @@ async function startServer() {
     const reviewsCollection = db.collection('reviews');
 
     // Health check
-    app.get('/', (req, res) => {
-      res.send('✅ Server is running');
+     app.get("/", (req, res) => {
+      res.send("✅ Server is running");
+    });
+   
+   
+   
+const fetchMeal = async () => {
+  setLoading(true);
+  const token = localStorage.getItem("auth_token");
+
+  if (!token) {
+    Swal.fire("Error", "No authorization token found. Please log in again.", "error");
+    setLoading(false);
+    return;
+  }
+
+  try {
+    const { data } = await axiosInstance.get(`/meals/${id}`, {
+      headers: {
+        Authorization: `Bearer ${token}`, // Add token to request header
+      },
+    });
+    setMeal(data);
+    setLikeCount(data.likes || 0);
+    setLiked(user?.email && data.likedBy?.includes(user.email));
+  } catch (error) {
+    Swal.fire("Error", "Failed to fetch meal details.", "error");
+  } finally {
+    setLoading(false);
+  }
+};
+
+
+    // Get meal details
+    app.get("/meals/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid ID" });
+
+        const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+        if (!meal) return res.status(404).json({ message: "Meal not found" });
+
+        res.json(meal);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+ 
+
+    // Get reviews for a meal
+    app.get("/reviews/:mealId", async (req, res) => {
+      const { mealId } = req.params;
+
+      if (!ObjectId.isValid(mealId)) {
+        return res.status(400).json({ message: "Invalid meal ID" });
+      }
+
+      try {
+        const reviews = await reviewsCollection
+          .find({ mealId: new ObjectId(mealId) })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(reviews);
+      } catch (error) {
+        console.error("Error fetching reviews:", error);
+        res.status(500).json({ message: "Failed to fetch reviews" });
+      }
     });
 
     // --- User Routes ---
@@ -107,7 +201,7 @@ app.post("/users/upsert", async (req, res) => {
 
 
 // GET /users?search=&page=1&limit=10
-app.get('/users', async (req, res) => {
+app.get('/users',async (req, res) => {
   try {
     const { search = '', page = '1', limit = '10' } = req.query;
 
@@ -145,7 +239,7 @@ app.get('/users', async (req, res) => {
 });
 
 // PATCH /users/:id/make-admin - Promote user to admin by ID
-app.patch('/users/:id/make-admin', async (req, res) => {
+app.patch('/users/:id/make-admin',async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -225,23 +319,31 @@ app.patch('/users/:id/make-admin', async (req, res) => {
     });
 
         // Get meal by ID
-    app.get('/meals/:id', async (req, res) => {
-      try {
-        const { id } = req.params;
-        if (!ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid ID' });
+   app.get("/meals/:id",async (req, res) => {
+  const { id } = req.params;
+  if (!ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid ID" });
 
-        const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
-        if (!meal) return res.status(404).json({ message: 'Meal not found' });
+  const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
+  if (!meal) return res.status(404).json({ message: "Meal not found" });
 
-        res.json(meal);
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
+  res.json(meal);
+});
+
+// Firebase Authentication - Generate token on successful login/register
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    const user = await admin.auth().getUserByEmail(email);
+    const token = await admin.auth().createCustomToken(user.uid);  // Create JWT token
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ message: "Error generating token" });
+  }
+});
 
     // ✅ Add a new meal (Admin only)
-app.post('/meals', async (req, res) => {
+app.post('/meals',async (req, res) => {
   try {
     const {
       title,
@@ -449,7 +551,7 @@ app.delete('/meals/:id', async (req, res) => {
 });
 
 // serve meals route for admins
-app.get('/serve-meals', async (req, res) => {
+app.get('/serve-meals',async (req, res) => {
   try {
     const { search = '', page = '1', limit = '10' } = req.query;
     const pageNumber = parseInt(page, 10);
@@ -501,7 +603,7 @@ app.get('/serve-meals', async (req, res) => {
 });
 
 // PUT /serve-meals/:requestId/serve
-app.put('/serve-meals/:requestId/serve', async (req, res) => {
+app.put('/serve-meals/:requestId/serve',async (req, res) => {
   try {
     const { requestId } = req.params;
     if (!ObjectId.isValid(requestId)) {
@@ -649,7 +751,7 @@ app.post('/meal-requests', async (req, res) => {
 
 
 // ✅ Get all requested meals for a user with meal details
-app.get('/requested-meals/:userEmail', async (req, res) => {
+app.get('/requested-meals/:userEmail',authMiddleware, async (req, res) => {
   try {
     const { userEmail } = req.params;
 
@@ -738,7 +840,7 @@ app.delete('/meal-requests/:id', async (req, res) => {
       }
     });
 // get all reviews with meals details
-    app.get('/all-reviews', async (req, res) => {
+    app.get('/all-reviews',authMiddleware, async (req, res) => {
   try {
     const reviews = await reviewsCollection.aggregate([
       {
@@ -775,25 +877,29 @@ app.delete('/meal-requests/:id', async (req, res) => {
 
 
     // Get reviews for a meal
-    app.get('/reviews/:mealId', async (req, res) => {
-      try {
-        const { mealId } = req.params;
-        if (!ObjectId.isValid(mealId)) return res.status(400).json({ message: 'Invalid ID' });
+  // Example server-side route in Express
+app.get("/reviews/:mealId", async (req, res) => {
+  const { mealId } = req.params;
 
-        const reviews = await reviewsCollection
-          .find({ mealId: new ObjectId(mealId) })
-          .sort({ createdAt: -1 })
-          .toArray();
+  if (!ObjectId.isValid(mealId)) {
+    return res.status(400).json({ message: "Invalid meal ID" });
+  }
 
-        res.json(reviews);
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
+  try {
+    const reviews = await reviewsCollection
+      .find({ mealId: new ObjectId(mealId) })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json(reviews);
+  } catch (error) {
+    console.error("Error fetching reviews:", error);
+    res.status(500).json({ message: "Failed to fetch reviews" });
+  }
+});
 
     // Get reviews by user (with meal info and mealId)
-    app.get('/my-reviews/:userEmail', async (req, res) => {
+    app.get('/my-reviews/:userEmail',authMiddleware, async (req, res) => {
       try {
         const reviews = await reviewsCollection
           .aggregate([
@@ -955,7 +1061,6 @@ app.patch('/upcoming-meals/:id/like', async (req, res) => {
   }
 });
 
-// ==============================
 // POST: Add new upcoming meal
 // ==============================
 app.post('/upcoming-meals', async (req, res) => {
@@ -997,8 +1102,8 @@ app.post('/upcoming-meals', async (req, res) => {
   }
 });
 
-// ==============================
-// POST: Publish upcoming meal (move to main mealsCollection)
+
+// // POST: Publish upcoming meal (move to main mealsCollection)
 // ==============================
 app.post('/upcoming-meals/publish', async (req, res) => {
   try {
@@ -1039,7 +1144,7 @@ app.post('/upcoming-meals/publish', async (req, res) => {
 
     // --- Stripe Payment Routes ---
 
-    // Create Stripe payment intent
+// Create Stripe payment intent
     app.post('/create-payment-intent', async (req, res) => {
       try {
         const { amount, packageName, userEmail } = req.body;
@@ -1059,7 +1164,7 @@ app.post('/upcoming-meals/publish', async (req, res) => {
       }
     });
 
-    // Save payment info & update user badge
+ // Save payment info & update user badge
     app.post('/payments/save', async (req, res) => {
       try {
         const { userEmail, packageName, paymentIntentId, amount, status, purchasedAt } = req.body;
@@ -1094,7 +1199,7 @@ app.post('/upcoming-meals/publish', async (req, res) => {
       }
     });
 
-    // --- NEW: Get payment history for a user ---
+// --- NEW: Get payment history for a user ---
     app.get('/payments/:userEmail', async (req, res) => {
       try {
         const { userEmail } = req.params;
