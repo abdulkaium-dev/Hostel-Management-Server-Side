@@ -51,7 +51,7 @@ const client = new MongoClient(uri, {
 
 async function startServer() {
   try {
-    await client.connect();
+    // await client.connect();
     console.log('✅ Connected to MongoDB');
 
     const db = client.db('hostelDB');
@@ -201,39 +201,35 @@ app.post("/users/upsert", async (req, res) => {
 
 
 // GET /users?search=&page=1&limit=10
-app.get('/users',async (req, res) => {
+app.get('/users', async (req, res) => {
   try {
     const { search = '', page = '1', limit = '10' } = req.query;
 
-    const pageNumber = parseInt(page, 10) || 1;
-    const limitNumber = parseInt(limit, 10) || 10;
+    const pageNumber = Math.max(parseInt(page, 10), 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit, 10), 1), 50);
     const skip = (pageNumber - 1) * limitNumber;
 
     const query = {};
     if (search) {
-      const searchRegex = new RegExp(search, 'i'); // case-insensitive
-      query.$or = [
-        { displayName: { $regex: searchRegex } },
-        { email: { $regex: searchRegex } },
-      ];
+      const regex = new RegExp(search, 'i');
+      query.$or = [{ username: regex }, { email: regex }];
     }
 
-    const total = await usersCollection.countDocuments(query);
+    const totalCount = await usersCollection.countDocuments(query);
     const users = await usersCollection
       .find(query)
       .skip(skip)
       .limit(limitNumber)
-      .project({ displayName: 1, email: 1, role: 1, badge: 1 })
       .toArray();
 
     res.json({
+      totalCount,
+      totalPages: Math.ceil(totalCount / limitNumber),
+      currentPage: pageNumber,
       users,
-      total,
-      page: pageNumber,
-      limit: limitNumber,
     });
   } catch (err) {
-    console.error('Error fetching users:', err);
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -398,30 +394,33 @@ app.post('/meals',async (req, res) => {
 
 
 // GET /all-meals?sortBy=likes|reviewCount|rating&order=asc|desc&page=1&limit=10
+// Pagination, sorting, and filtering for meals list
 app.get('/all-meals', async (req, res) => {
   try {
-    const { 
-      sortBy = 'likes', 
-      order = 'desc', 
-      page = '1', 
-      limit = '10' 
+    const {
+      sortBy = 'likes',
+      order = 'desc',
+      page = '1',
+      limit = '10',
     } = req.query;
 
-    const pageNumber = parseInt(page, 10) || 1;
-    const limitNumber = parseInt(limit, 10) || 10;
+    const pageNumber = Math.max(parseInt(page, 10), 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit, 10), 1), 50); // limit max 50 for safety
     const skip = (pageNumber - 1) * limitNumber;
 
+    // Allowed sorting fields for safety
     const allowedSortFields = ['likes', 'reviewCount', 'rating'];
     if (!allowedSortFields.includes(sortBy)) {
       return res.status(400).json({ message: 'Invalid sort field' });
     }
 
     const sortOrder = order === 'asc' ? 1 : -1;
-    const sortCriteria = {};
-    sortCriteria[sortBy] = sortOrder;
+    const sortCriteria = { [sortBy]: sortOrder };
 
+    // Count total documents (without filters)
     const total = await mealsCollection.countDocuments();
 
+    // Fetch paginated & sorted meals
     const meals = await mealsCollection
       .find({})
       .sort(sortCriteria)
@@ -436,7 +435,12 @@ app.get('/all-meals', async (req, res) => {
       })
       .toArray();
 
-    res.json({ total, page: pageNumber, limit: limitNumber, meals });
+    res.json({
+      total,
+      page: pageNumber,
+      limit: limitNumber,
+      meals,
+    });
   } catch (err) {
     console.error('Error fetching all meals:', err);
     res.status(500).json({ message: 'Server error' });
@@ -603,9 +607,43 @@ app.get('/serve-meals',async (req, res) => {
 });
 
 // PUT /serve-meals/:requestId/serve
-app.put('/serve-meals/:requestId/serve',async (req, res) => {
+app.get('/serve-meals', async (req, res) => {
+  try {
+    const { search = '', page = '1', limit = '10' } = req.query;
+    const pageNumber = parseInt(page, 10);
+    const limitNumber = parseInt(limit, 10);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    // Build search query for userName or userEmail (case-insensitive)
+    const query = {};
+    if (search) {
+      const regex = new RegExp(search, 'i');
+      query.$or = [{ userName: regex }, { userEmail: regex }];
+    }
+
+    // Count total matching documents
+    const total = await mealRequestsCollection.countDocuments(query);
+
+    // Get paginated meal requests sorted by newest first
+    const requests = await mealRequestsCollection
+      .find(query)
+      .sort({ _id: -1 }) // newest first
+      .skip(skip)
+      .limit(limitNumber)
+      .toArray();
+
+    res.json({ requests, total });
+  } catch (error) {
+    console.error('GET /serve-meals error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+app.put('/serve-meals/:requestId/serve', async (req, res) => {
   try {
     const { requestId } = req.params;
+
     if (!ObjectId.isValid(requestId)) {
       return res.status(400).json({ message: 'Invalid request ID' });
     }
@@ -625,6 +663,7 @@ app.put('/serve-meals/:requestId/serve',async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
+
 
 
 
@@ -751,10 +790,21 @@ app.post('/meal-requests', async (req, res) => {
 
 
 // ✅ Get all requested meals for a user with meal details
-app.get('/requested-meals/:userEmail',authMiddleware, async (req, res) => {
+// Assuming Express and MongoDB setup and authMiddleware is ready
+
+app.get('/requested-meals/:userEmail', async (req, res) => {
   try {
     const { userEmail } = req.params;
+    const { page = '1', limit = '10' } = req.query;
 
+    const pageNumber = Math.max(parseInt(page, 10), 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit, 10), 1), 50);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    // Total count of meal requests for the user
+    const totalCount = await mealRequestsCollection.countDocuments({ userEmail });
+
+    // Aggregation pipeline with pagination
     const requests = await mealRequestsCollection.aggregate([
       { $match: { userEmail } },
       {
@@ -776,10 +826,17 @@ app.get('/requested-meals/:userEmail',authMiddleware, async (req, res) => {
           requestedAt: 1,
         },
       },
-      { $sort: { requestedAt: -1 } }
+      { $sort: { requestedAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNumber },
     ]).toArray();
 
-    res.json(requests);
+    res.json({
+      requests,
+      totalCount,
+      totalPages: Math.ceil(totalCount / limitNumber),
+      currentPage: pageNumber,
+    });
   } catch (err) {
     console.error('Error fetching requested meals:', err);
     res.status(500).json({ message: 'Server error' });
@@ -840,8 +897,16 @@ app.delete('/meal-requests/:id', async (req, res) => {
       }
     });
 // get all reviews with meals details
-    app.get('/all-reviews',authMiddleware, async (req, res) => {
+ app.get('/all-reviews', async (req, res) => {
   try {
+    // Read pagination params with default values
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // To get total count of reviews for pagination metadata
+    const totalReviews = await reviewsCollection.countDocuments();
+
     const reviews = await reviewsCollection.aggregate([
       {
         $lookup: {
@@ -866,14 +931,22 @@ app.delete('/meal-requests/:id', async (req, res) => {
         },
       },
       { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limit },
     ]).toArray();
 
-    res.json(reviews);
+    res.json({
+      totalItems: totalReviews,
+      totalPages: Math.ceil(totalReviews / limit),
+      currentPage: page,
+      reviews,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
+
 
 
     // Get reviews for a meal
@@ -899,40 +972,55 @@ app.get("/reviews/:mealId", async (req, res) => {
 });
 
     // Get reviews by user (with meal info and mealId)
-    app.get('/my-reviews/:userEmail',authMiddleware, async (req, res) => {
-      try {
-        const reviews = await reviewsCollection
-          .aggregate([
-            { $match: { userEmail: req.params.userEmail } },
-            {
-              $lookup: {
-                from: 'meals',
-                localField: 'mealId',
-                foreignField: '_id',
-                as: 'mealDetails',
-              },
-            },
-            { $unwind: '$mealDetails' },
-            {
-              $project: {
-                _id: 1,
-                comment: 1,
-                createdAt: 1,
-                mealId: '$mealDetails._id',
-                mealTitle: '$mealDetails.title',
-                likes: '$mealDetails.likes',
-              },
-            },
-            { $sort: { createdAt: -1 } },
-          ])
-          .toArray();
+app.get('/my-reviews/:userEmail', authMiddleware, async (req, res) => {
+  try {
+    const { userEmail } = req.params;
+    const { page = '1', limit = '10' } = req.query;
 
-        res.json(reviews);
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
+    const pageNumber = Math.max(parseInt(page, 10), 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit, 10), 1), 50);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const totalCount = await reviewsCollection.countDocuments({ userEmail });
+
+    const reviews = await reviewsCollection.aggregate([
+      { $match: { userEmail } },
+      {
+        $lookup: {
+          from: 'meals',
+          localField: 'mealId',
+          foreignField: '_id',
+          as: 'mealDetails',
+        },
+      },
+      { $unwind: '$mealDetails' },
+      {
+        $project: {
+          _id: 1,
+          comment: 1,
+          createdAt: 1,
+          mealId: '$mealDetails._id',
+          mealTitle: '$mealDetails.title',
+          likes: '$mealDetails.likes',
+        },
+      },
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNumber },
+    ]).toArray();
+
+    res.json({
+      reviews,
+      totalCount,
+      totalPages: Math.ceil(totalCount / limitNumber),
+      currentPage: pageNumber,
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 
     // Delete a review by ID (with decrement reviewCount)
     app.delete('/reviews/:id', async (req, res) => {
@@ -1109,10 +1197,18 @@ app.post('/upcoming-meals/publish', async (req, res) => {
   try {
     const { mealId, addedByEmail } = req.body;
 
-    if (!ObjectId.isValid(mealId)) return res.status(400).json({ message: 'Invalid meal ID' });
+    if (!ObjectId.isValid(mealId)) 
+      return res.status(400).json({ message: 'Invalid meal ID' });
 
     const upcomingMeal = await upcomingMealsCollection.findOne({ _id: new ObjectId(mealId) });
-    if (!upcomingMeal) return res.status(404).json({ message: 'Upcoming meal not found' });
+    if (!upcomingMeal) 
+      return res.status(404).json({ message: 'Upcoming meal not found' });
+
+    // Enforce minimum likes requirement before publishing
+    const MIN_LIKES_TO_PUBLISH = 10;
+    if ((upcomingMeal.likes || 0) < MIN_LIKES_TO_PUBLISH) {
+      return res.status(400).json({ message: `Cannot publish. Minimum ${MIN_LIKES_TO_PUBLISH} likes required.` });
+    }
 
     const mealToAdd = {
       title: upcomingMeal.title,
@@ -1140,6 +1236,7 @@ app.post('/upcoming-meals/publish', async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
+
 
 
     // --- Stripe Payment Routes ---
