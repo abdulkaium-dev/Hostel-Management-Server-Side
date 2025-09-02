@@ -139,16 +139,59 @@ const fetchMeal = async () => {
     // --- User Routes ---
 
     // Get user info by email
+// Get user by email
 app.get('/users/:email', async (req, res) => {
+  const { email } = req.params;
+
+  // Validate email
+  if (!email) {
+    return res.status(400).json({ message: 'Email parameter is required' });
+  }
+
   try {
-    const user = await usersCollection.findOne({ email: req.params.email });
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
+    // Fetch user and exclude sensitive fields like password
+    const user = await usersCollection.findOne(
+      { email },
+      { projection: { password: 0 } } 
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Return user data
+    res.status(200).json(user);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Error fetching user:', err);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+
+// Dashboard stats route
+app.get("/dashboard/overview-stats", authMiddleware, async (req, res) => {
+  try {
+    const totalUsers = await usersCollection.countDocuments();
+    const totalMeals = await mealsCollection.countDocuments();
+    const totalRequests = await mealRequestsCollection.countDocuments();
+    const totalReviews = await reviewsCollection.countDocuments();
+
+    const mealLikes = await mealsCollection
+      .find({}, { projection: { title: 1, likes: 1 } })
+      .sort({ likes: -1 })
+      .limit(5)
+      .toArray();
+
+    res.json({ totalUsers, totalMeals, totalRequests, totalReviews, mealLikes });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+
+
+
 
 
     // ✅ PATCH: Update user badge manually (admin or system can use this)
@@ -284,35 +327,68 @@ app.patch('/users/:id/make-admin',async (req, res) => {
     // --- Meals Routes ---
 
     // Get meals with search, filter, pagination
-    app.get('/meals', async (req, res) => {
-      try {
-        const { search = '', category, minPrice, maxPrice, page = 1, limit = 6 } = req.query;
-        const query = {};
+app.get('/meals', async (req, res) => {
+  try {
+    const { 
+      search = '', 
+      category, 
+      minPrice, 
+      maxPrice, 
+      page = 1, 
+      limit = 6, 
+      sortByPrice 
+    } = req.query;
 
-        if (search) {
-          query.$or = [
-            { title: { $regex: search, $options: 'i' } },
-            { description: { $regex: search, $options: 'i' } },
-            { category: { $regex: search, $options: 'i' } },
-          ];
-        }
-        if (category && category !== 'All') query.category = category;
-        if (minPrice || maxPrice) {
-          query.price = {};
-          if (minPrice) query.price.$gte = parseFloat(minPrice);
-          if (maxPrice) query.price.$lte = parseFloat(maxPrice);
-        }
+    const query = {};
 
-        const skip = (parseInt(page) - 1) * parseInt(limit);
-        const total = await mealsCollection.countDocuments(query);
-        const meals = await mealsCollection.find(query).skip(skip).limit(parseInt(limit)).toArray();
+    // Search filter
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } },
+      ];
+    }
 
-        res.json({ total, page: parseInt(page), meals });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
+    // Category filter
+    if (category && category !== 'All') query.category = category;
+
+    // Price filter
+    if (minPrice || maxPrice) {
+      query.price = {};
+      if (minPrice) query.price.$gte = parseFloat(minPrice);
+      if (maxPrice) query.price.$lte = parseFloat(maxPrice);
+    }
+
+    // Pagination
+    const pageNumber = Math.max(parseInt(page, 10), 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit, 10), 1), 50);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    // Sorting
+    let sort = {};
+    if (sortByPrice === 'asc') sort = { price: 1 };
+    else if (sortByPrice === 'desc') sort = { price: -1 };
+
+    // Get total count for pagination
+    const total = await mealsCollection.countDocuments(query);
+
+    // Fetch meals
+    const meals = await mealsCollection
+      .find(query)
+      .sort(sort)
+      .skip(skip)
+      .limit(limitNumber)
+      .toArray();
+
+    res.json({ total, page: pageNumber, meals });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
 
         // Get meal by ID
    app.get("/meals/:id",async (req, res) => {
